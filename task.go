@@ -25,9 +25,11 @@ type Task struct {
 	TaskPriority int
 	// 任务对象，创建任务的时候赋予
 	TaskItem interface{}
+	// DeviceId 可选：用于按设备分桶的容器(deviceBucketContainer)。不需要分桶可留空。
+	DeviceId string
 
 	TaskStartTime time.Time // 框架赋予值
-	TaskEnbTime   time.Time // 框架赋予值
+	TaskEndTime   time.Time // 任务结束时间 (renamed from TaskEnbTime)
 	// 任务状态，任务容器负责赋予值
 	TaskStatus TaskStatus
 	// 任务容器负责赋予值

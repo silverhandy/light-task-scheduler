@@ -96,8 +96,6 @@ type TaskScheduler struct {
 }
 
 // MakeScheduler 新建任务调度器
-// 如果不需要对任务数据此久化，persistencer 可以设置为 nil
-// 调度器构建以后，自动开始任务调度
 func MakeScheduler(
 	container TaskContainer,
 	actuator TaskActuator,
@@ -137,9 +135,7 @@ func (s *TaskScheduler) AddTask(ctx context.Context, task Task) error {
 }
 
 // FinshedTasks 返回的完成的任务的 channel
-func (s *TaskScheduler) FinshedTasks() chan *Task {
-	return s.finshedTask
-}
+func (s *TaskScheduler) FinshedTasks() chan *Task { return s.finshedTask }
 
 // StopTask 停止一个任务
 func (s *TaskScheduler) StopTask(ctx context.Context, ftask *Task) error {
@@ -157,10 +153,12 @@ func (s *TaskScheduler) StopTask(ctx context.Context, ftask *Task) error {
 
 // Close 停止调度
 func (s *TaskScheduler) Close() {
+	// 先取消上下文让后续 goroutine 快速退出
+	s.cancel()
+	// 此处不等待所有 goroutine（仅部分任务使用 s.wg 计数），保持原有轻量语义
 	if s.config.EnableFinshedTaskList {
 		close(s.finshedTask)
 	}
-	s.cancel()
 }
 
 func (s *TaskScheduler) checkProcessed(t *Task) bool {
@@ -258,23 +256,15 @@ func (s *TaskScheduler) start() {
 
 func (s *TaskScheduler) schedulerTask() {
 	if s.config.SchedulingPollInterval == 0 {
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-				s.scheduleOnce(s.ctx)
-			}
-		}
-	} else {
-		ticker := time.NewTicker(s.config.SchedulingPollInterval)
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case <-ticker.C:
-				s.scheduleOnce(s.ctx)
-			}
+		s.config.SchedulingPollInterval = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(s.config.SchedulingPollInterval)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.scheduleOnce(s.ctx)
 		}
 	}
 }
@@ -323,62 +313,64 @@ func (s *TaskScheduler) scheduleOnce(ctx context.Context) {
 
 func (s *TaskScheduler) updateTaskStatus() {
 	if s.config.StatePollInterval == 0 {
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-				s.updateOnce(s.ctx)
-			}
-		}
-	} else {
-		ticker := time.NewTicker(s.config.StatePollInterval)
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case <-ticker.C:
-				s.updateOnce(s.ctx)
-			}
+		s.config.StatePollInterval = 50 * time.Millisecond
+	}
+	ticker := time.NewTicker(s.config.StatePollInterval)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.updateOnce(s.ctx)
 		}
 	}
 }
 
+// improved: add ctx awareness
 func (s *TaskScheduler) updateCallbackTask() {
-	for t := range s.config.CallbackReceiver.GetCallbackChannel(s.ctx) {
-		// 可能是轮询已经处理过，或者重复回调
-		if !s.checkProcessed(&t) {
-			continue
-		}
-		s.wg.Add(1)
-		task := t
-		go func() {
-			defer s.wg.Done()
-			if task.TaskStatus == TASK_STATUS_FAILED {
-				// 失败可以重试
-				if task.TaskAttemptsTime < s.config.MaxFailedAttempts {
-					task.TaskAttemptsTime++
-					newTask, _, err := s.Actuator.Start(s.ctx, &task)
-					// 尝试重启失败
-					if err != nil {
-						resaon := fmt.Errorf("任务执行失败：%v, 并且尝试重启也失败 %v", task.FailedReason, err)
-						s.failed(s.ctx, &task, resaon)
-					} else {
-						_, err = s.Container.ToRunningStatus(s.ctx, newTask) // 更新状态
+	ch := s.config.CallbackReceiver.GetCallbackChannel(s.ctx)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case t, ok := <-ch:
+			if !ok {
+				return
+			}
+			// 可能是轮询已经处理过，或者重复回调
+			if !s.checkProcessed(&t) {
+				continue
+			}
+			s.wg.Add(1)
+			task := t
+			go func() {
+				defer s.wg.Done()
+				if task.TaskStatus == TASK_STATUS_FAILED {
+					// 失败可以重试
+					if task.TaskAttemptsTime < s.config.MaxFailedAttempts {
+						task.TaskAttemptsTime++
+						newTask, _, err := s.Actuator.Start(s.ctx, &task)
+						// 尝试重启失败
 						if err != nil {
-							s.Actuator.Stop(s.ctx, newTask)
 							resaon := fmt.Errorf("任务执行失败：%v, 并且尝试重启也失败 %v", task.FailedReason, err)
 							s.failed(s.ctx, &task, resaon)
-							return
+						} else {
+							_, err = s.Container.ToRunningStatus(s.ctx, newTask) // 更新状态
+							if err != nil {
+								s.Actuator.Stop(s.ctx, newTask)
+								resaon := fmt.Errorf("任务执行失败：%v, 并且尝试重启也失败 %v", task.FailedReason, err)
+								s.failed(s.ctx, &task, resaon)
+								return
+							}
 						}
+					} else {
+						s.failed(s.ctx, &task, task.FailedReason)
 					}
-				} else {
-					s.failed(s.ctx, &task, task.FailedReason)
+				} else if task.TaskStatus == TASK_STATUS_SUCCESS {
+					s.export(s.ctx, &task)
 				}
-			} else if task.TaskStatus == TASK_STATUS_SUCCESS {
-				s.export(s.ctx, &task)
-			}
-		}()
+			}()
+		}
 	}
 }
 
@@ -453,29 +445,25 @@ func (s *TaskScheduler) updateOnce(ctx context.Context) {
 
 func (s *TaskScheduler) finshed(ctx context.Context, task *Task) {
 	// 添加到完成的任务 channel
-	task.TaskEnbTime = time.Now()
+	task.TaskEndTime = time.Now()
 
 	if s.config.EnableFinshedTaskList {
-		c := time.NewTimer(50 * time.Millisecond)
-		retryCount := 0
-		select {
-		case s.finshedTask <- task:
-			return
-		case <-c.C:
-			// 因为缓存满了，导致加入不进去，chan 弹出一个元素
-			// 最多超时三次
-			if retryCount >= 3 {
-				return
-			}
-			c.Reset(0)
+		const maxRetry = 3
+		for i := 0; i <= maxRetry; i++ {
 			select {
-			case <-s.finshedTask:
-				break
-			case <-c.C:
-				break
+			case s.finshedTask <- task:
+				return
+			default:
+				if i == maxRetry {
+					return
+				}
+				// 尝试释放一个老的元素
+				select {
+				case <-s.finshedTask:
+				default:
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
-			c.Reset(0)
-			retryCount++
 		}
 	}
 }
@@ -527,4 +515,25 @@ func (s *TaskScheduler) success(ctx context.Context, task *Task) (*Task, error) 
 		s.finshed(ctx, newtask)
 	}
 	return newtask, err
+}
+
+// retryOrFail 统一重试逻辑
+func (s *TaskScheduler) retryOrFail(ctx context.Context, task *Task, failedReason error) {
+	if task.TaskAttemptsTime < s.config.MaxFailedAttempts {
+		task.TaskAttemptsTime++
+		newTask, _, err := s.Actuator.Start(ctx, task)
+		if err != nil { // 重启失败
+			resaon := fmt.Errorf("任务执行失败：%v, 并且尝试重启也失败 %v", failedReason, err)
+			s.failed(ctx, task, resaon)
+			return
+		}
+		if _, err = s.Container.ToRunningStatus(ctx, newTask); err != nil {
+			s.Actuator.Stop(ctx, newTask)
+			resaon := fmt.Errorf("任务执行失败：%v, 并且尝试重启也失败 %v", failedReason, err)
+			s.failed(ctx, task, resaon)
+			return
+		}
+		return
+	}
+	s.failed(ctx, task, failedReason)
 }

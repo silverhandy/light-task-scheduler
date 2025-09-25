@@ -78,10 +78,10 @@ func main() {
 	for task := range sch.FinshedTasks() {
 		if task.TaskStatus == lighttaskscheduler.TASK_STATUS_FAILED {
 			log.Printf("failed task %s, reason: %s, timecost: %dms\n",
-				task.TaskId, task.FailedReason, task.TaskEnbTime.Sub(task.TaskStartTime).Milliseconds())
+				task.TaskId, task.FailedReason, task.TaskEndTime.Sub(task.TaskStartTime).Milliseconds())
 		} else if task.TaskStatus == lighttaskscheduler.TASK_STATUS_SUCCESS {
 			log.Printf("success task %s, timecost: %dms\n", task.TaskId,
-				task.TaskEnbTime.Sub(task.TaskStartTime).Milliseconds())
+				task.TaskEndTime.Sub(task.TaskStartTime).Milliseconds())
 		}
 	}
 }

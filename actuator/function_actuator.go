@@ -119,7 +119,7 @@ func (fc *fucntionActuator) Start(ctx context.Context, ftask *framework.Task) (
 			// 如果需要回调
 			callbackTask := *ftask
 			callbackTask.TaskStatus = newStatus.TaskStatus
-			callbackTask.TaskEnbTime = time.Now()
+			callbackTask.TaskEndTime = time.Now()
 			if newStatus.FailedReason != nil {
 				callbackTask.FailedReason = newStatus.FailedReason
 			}
