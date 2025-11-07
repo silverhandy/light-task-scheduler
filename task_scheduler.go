@@ -304,11 +304,11 @@ func (s *TaskScheduler) scheduleOnce(ctx context.Context) {
 				}
 				return
 			}
-			if count, err := s.Container.GetRunningTaskCount(ctx); err == nil && count >= s.config.TaskLimit {
-				// 多调度器可能出现的问题，超过任务数量限制，取消当前任务调度
-				s.Actuator.Stop(ctx, newTask)
-				return
-			}
+			// if count, err := s.Container.GetRunningTaskCount(ctx); err == nil && count >= s.config.TaskLimit {
+			// 	// 多调度器可能出现的问题，超过任务数量限制，取消当前任务调度
+			// 	s.Actuator.Stop(ctx, newTask)
+			// 	return
+			// }
 			_, err = s.Container.ToRunningStatus(ctx, newTask)
 			if err != nil {
 				s.Actuator.Stop(ctx, newTask)
